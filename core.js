@@ -83,6 +83,28 @@ export function rows(tree, desk, claimInfo, me, stage) {
 
 export const STATE_NAME = { imported: '已导入', done: '已完成', mine: '我在做', taken: '有人在做', free: '没人做' };
 
+/** 这一集现在锁没锁、谁能解（11-20 用户定：一集有人交过，别人只能看、不能再交；只有交的人自己能清空，管理员谁的都能清、谁的认领都能放）。
+ *  r = rows() 的一行；admins = desk.json 里的管理员账号。回：
+ *    locked = 我不能交；why = 'imported'（已导入流水线，谁也不能再交）/ 'done'（别人交过）/ 'taken'（别人正在做，认领还没过期）；by = 是谁
+ *    canClear = 我能清空这一集交上来的（自己交的，或者我是管理员；已导入的在网页上谁也清不了）
+ *    canRelease = 我能放掉这一集的认领（自己认领的，或者我是管理员；已经有人交了就走清空）
+ *  认领超过 STALE_HOURS 没交算过期，别人可以接手（不然随手点开一集就把它锁死了）。 */
+export function lockOf(r, me, admins = [], now = Date.now()) {
+  const results = (r && r.results) || [];
+  const admin = (admins || []).includes(me);
+  const others = results.filter((k) => k !== me);
+  const claimBy = (r && r.claim && r.claim.by) || '';
+  let locked = false;
+  let why = '';
+  let by = '';
+  if (r.imported) { locked = true; why = 'imported'; by = results.join('、'); }
+  else if (others.length && !results.includes(me)) { locked = true; why = 'done'; by = others.join('、'); }
+  else if (!results.length && r.claim && claimBy !== me && !isStale(r.claim, now)) { locked = true; why = 'taken'; by = claimBy; }
+  const canClear = !r.imported && results.length > 0 && (admin || results.includes(me));
+  const canRelease = !r.imported && !results.length && !!r.claim && (admin || claimBy === me);
+  return { locked, why, by, canClear, canRelease, admin };
+}
+
 /** 各状态的个数 */
 export function summary(rs) {
   const s = { total: rs.length, imported: 0, done: 0, mine: 0, taken: 0, free: 0 };

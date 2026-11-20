@@ -1,9 +1,9 @@
 // 科普视频审稿台网页：登录（GitHub 口令）→ 先选领域、再选哪一步（三选一 / 细改 / 听评）→ 打开一集（页面在下面的框里）→ 提交写回私有仓库。
 // 这个文件只有程序，不含任何讲稿；讲稿、配音都在私有仓库里，登录后才取得到。纯函数在 core.js。
 import {
-  STAGES, STAGE_HINT, STATE_NAME, ago, b64, domainOf, domainsOf, draftKey, encPath, firstStop, isStale, makeHash, makeResult, nextRow, normRepo,
+  STAGES, STAGE_HINT, STATE_NAME, ago, b64, domainOf, domainsOf, draftKey, encPath, firstStop, isStale, lockOf, makeHash, makeResult, nextRow, normRepo,
   openCount, parseHash, parseTree, payloadOk, resultToShow, rows, stateOfResult, summary,
-} from './core.js?v=20261120a';
+} from './core.js?v=20261120b';
 
 const APP = '2026-11-20';
 const API = 'https://api.github.com';
@@ -23,6 +23,15 @@ const ls = {
     } catch { /* 隐私模式 */ }
   },
 };
+/** 管理员（desk.json 的 admins，流水线那边 config/desk.json 定）：谁交的都能清空、谁的认领都能放。锁只是网页上的规矩，防的是误操作。 */
+const admins = () => (S.desk && Array.isArray(S.desk.admins) ? S.desk.admins : []);
+const isAdmin = () => admins().includes(S.login);
+/** 锁住时顶上和提交按钮旁边说的话 */
+function lockText(lk) {
+  if (lk.why === 'imported') return '这一集已经导入流水线了，只能看、不能再交。要重做找管理员。';
+  if (lk.why === 'done') return `${lk.by} 已经交过这一集，你只能看、不能再交。要重做，得 ${lk.by} 自己清空，或者找管理员清空。`;
+  return `${lk.by || '有人'} 正在做这一集，你只能看、不能交。等对方交完或放弃认领；认领超过 12 小时没交可以接手。`;
+}
 const drafts = {
   get(stage, pid) { try { return JSON.parse(ls.get(draftKey(S.repo, stage, pid)) || 'null'); } catch { return null; } },
   set(stage, pid, d) { return ls.set(draftKey(S.repo, stage, pid), JSON.stringify(d)); },
@@ -290,12 +299,11 @@ function openRow(r) {
 async function openTask(r, push = true) {
   const { stage, pid } = r;
   const claimPath = `claims/${stage}/${pid}.json`;
-  if (r.state === 'taken') {
+  let raced = ''; // 我点开的同时别人先认领了：是谁
+  if (r.state === 'taken' && isStale(r.claim || {})) { // 认领超过 12 小时没交：可以接手。没过期的不问、不认领，打开只能看（锁，11-20）
     const c = r.claim || {};
-    const stale = isStale(c);
-    const ok = confirm(`${c.by || '有人'} ${ago(c.at)}认领了这一集${stale ? '（已经很久了）' : ''}。\n\n仍要打开吗？${stale ? '打开就算你接手。' : ''}\n你交的会单独存一份，不会覆盖 ${c.by || '对方'} 的。`);
-    if (!ok) return;
-    if (stale && S.canPush) {
+    if (!confirm(`${c.by || '有人'} ${ago(c.at)}认领了这一集，一直没交。\n\n打开就算你接手，仍要打开吗？`)) return;
+    if (S.canPush) {
       try { await putJson(claimPath, { by: S.login, at: new Date().toISOString(), stage, project: pid, took_over: c.by || '' }, `接手 ${STAGES[stage]}：${pid}（${S.login}）`, S.tree.sha[claimPath]); } catch { /* 接手失败也照样能看 */ }
     }
   } else if (r.state === 'free' && S.canPush) {
@@ -305,16 +313,19 @@ async function openTask(r, push = true) {
       if (e.status === 422) { // 刚被别人认领了
         await load();
         const info = S.claimInfo[`${stage}/${pid}`] || {};
-        if (info.by && info.by !== S.login && !confirm(`${info.by} 刚刚认领了这一集。仍要打开吗？你交的会单独存一份。`)) { renderList(); return; }
+        if (info.by && info.by !== S.login) { raced = info.by; toast(`${info.by} 刚刚认领了这一集，你只能看`); }
       } else throw e;
     }
   }
-  if ((r.state === 'free' || (r.state === 'taken' && isStale(r.claim || {}))) && S.canPush && !S.tree.results[stage][pid]) {
+  const iHold = !raced && (r.state === 'free' || r.state === 'mine' || (r.state === 'taken' && isStale(r.claim || {}))); // 这一集的认领在我手上
+  if (iHold && r.state !== 'mine' && S.canPush && !S.tree.results[stage][pid]) {
     S.tree.claims[stage][pid] = S.tree.claims[stage][pid] || claimPath; // 认领了：本地先记上，回列表马上就是「我在做」
     S.claimInfo[`${stage}/${pid}`] = { by: S.login, at: new Date().toISOString(), sha: S.tree.sha[claimPath] };
   }
   const task = S.tree.tasks[stage][pid];
-  S.current = { stage, pid, pageSha: task.pageSha, metaSha: task.metaSha, row: r, submitted: false };
+  const rowNow = raced ? rows(S.tree, S.desk, S.claimInfo, S.login, stage).find((x) => x.pid === pid) || r : r;
+  const lk = lockOf(rowNow, S.login, admins());
+  S.current = { stage, pid, pageSha: task.pageSha, metaSha: task.metaSha, row: r, submitted: false, lock: lk };
   setView({ domain: domainOf(r), stage }, push);
   $('list').hidden = true;
   $('task').hidden = false;
@@ -323,13 +334,16 @@ async function openTask(r, push = true) {
   const sub = [ep.episode, ep.part && `${ep.part}集`, ep.frames && `第 ${ep.frames} 帧`].filter(Boolean).join(' · ');
   $('tasktitle').textContent = `${STAGES[stage]} · ${ep.title || pid}` + (sub ? `（${sub}）` : '');
   $('taskmsg').textContent = '取页面中…';
-  $('release').hidden = !(r.state === 'free' || r.state === 'mine');
+  $('release').hidden = !(iHold || lk.canRelease);
+  $('release').textContent = iHold ? '放弃认领' : `放掉 ${lk.by || '对方'} 的认领（管理员）`;
+  $('clear').hidden = !lk.canClear;
+  $('clear').textContent = rowNow.mineDone ? '清空我交的' : `清空 ${rowNow.results.join('、')} 交的（管理员）`;
   $('next').hidden = true;
   freshFrame('');
   const html = await getText(task.page);
   if (!S.current || S.current.pid !== pid || S.current.stage !== stage) return;
   freshFrame(html);
-  $('taskmsg').textContent = r.mineDone ? '你交过这一集；再提交会覆盖你那一份（旧的在仓库历史里）' : '填的内容会自动存在这台电脑上，做完点页面最底下的提交按钮';
+  $('taskmsg').textContent = lk.locked ? lockText(lk) : r.mineDone ? '你交过这一集；再提交会覆盖你那一份（旧的在仓库历史里）' : '填的内容会自动存在这台电脑上，做完点页面最底下的提交按钮';
 }
 
 /** 每次换页面都换一个新的框（同一个沙箱框反复换 srcdoc 时，第二个页面会整页画不出来，11-11 实测）；页面先放进去再挂上 */
@@ -373,9 +387,39 @@ async function release() {
     if (sha) {
       const c = await getJson(path);
       if (c.by === S.login) await delFile(path, sha, `放弃认领 ${STAGES[stage]}：${pid}（${S.login}）`);
+      else if (isAdmin()) await delFile(path, sha, `管理员放掉认领 ${STAGES[stage]}：${pid}（原来是 ${c.by || '?'}，${S.login} 放的）`);
     }
   } catch (e) { toast('没放掉：' + explain(e), 'bad'); return; }
   drafts.del(stage, pid);
+  await backToList();
+}
+
+/** 清空这一集交上来的东西（11-20 用户定：只有交的人自己能清，管理员谁的都能清）：删提交、放掉认领，这一集回到「没人做」，别人可以重新做。
+ *  删掉的那份还在仓库历史里。已经导入流水线的在网页上不清（流水线那边已经用了它）。 */
+async function clearSubmitted() {
+  const cur = S.current;
+  if (!cur) return;
+  const { stage, pid } = cur;
+  try { await load(); } catch { /* 刷不了就按手上的判 */ }
+  const r = rows(S.tree, S.desk, S.claimInfo, S.login, stage).find((x) => x.pid === pid);
+  const lk = r ? lockOf(r, S.login, admins()) : null;
+  if (!r || !lk || !lk.canClear) { toast('这一集现在清不了：已经导入流水线，或者不是你交的', 'bad'); return; }
+  const who = lk.admin ? r.results.slice() : [S.login];
+  const mineOnly = who.length === 1 && who[0] === S.login;
+  if (!confirm(`${mineOnly ? '清空你交的这一份' : `清空 ${who.join('、')} 交的`}？\n\n清空以后这一集回到「没人做」，别人可以重新做。旧的那份还在仓库历史里，找得回来。`)) return;
+  try {
+    for (const k of who) {
+      const p = `results/${stage}/${pid}/${k}.json`;
+      const sha = await shaOf(p);
+      if (sha) await delFile(p, sha, `清空提交 ${STAGES[stage]}：${pid}（${k} 交的，${S.login} 清的）`);
+    }
+    const cp = `claims/${stage}/${pid}.json`;
+    const csha = await shaOf(cp);
+    if (csha) await delFile(cp, csha, `清空提交后放掉认领 ${STAGES[stage]}：${pid}（${S.login}）`);
+  } catch (e) { toast('没清掉：' + explain(e), 'bad'); return; }
+  drafts.del(stage, pid);
+  delete S.claimInfo[`${stage}/${pid}`];
+  toast('清空了，这一集回到「没人做」');
   await backToList();
 }
 
@@ -399,8 +443,10 @@ async function showSubmitted(win) {
     $('taskmsg').textContent = ((why === 'page' ? `${name}${ago(res.at)}交过，但之后页面换了新的，那一份填的内容对不上这一页，没有显示` : `${name}${ago(res.at)}交过；那一份是旧版网页交的，没存页面上填了什么，显示不出来`) + tail).trim();
     return;
   }
-  win.postMessage({ desk: 'restore', state, text: mine ? `这是你${ago(res.at)}提交时填的；改了再点提交会覆盖你那一份` : `这是 ${who} ${ago(res.at)}提交时填的。想改可以直接改了再点提交：你交的会另存一份，不会盖掉 ${who} 的` }, '*');
-  $('taskmsg').textContent = `下面是${name}${ago(res.at)}交的` + tail;
+  const imported = cur.lock && cur.lock.why === 'imported';
+  win.postMessage({ desk: 'restore', state, text: imported ? `这是${name}${ago(res.at)}提交时填的。这一集已经导入流水线，只能看` : mine ? `这是你${ago(res.at)}提交时填的；改了再点提交会覆盖你那一份`
+    : `这是 ${who} ${ago(res.at)}提交时填的，你只能看、不能再交。要重做，得 ${who} 自己清空，或者找管理员清空` }, '*');
+  $('taskmsg').textContent = `下面是${name}${ago(res.at)}交的` + (mine && !imported ? '' : '，只能看') + tail;
 }
 
 // 框里的页面发来的消息：ready（页面起来了：有草稿就发回去填上，没有草稿但有人交过就填交上去的那份）、draft（填的内容变了：存在这台电脑上）、submit（点了提交：写进私有仓库）
@@ -430,6 +476,12 @@ window.addEventListener('message', async (ev) => {
   const ack = (ok, text) => ev.source.postMessage({ desk: 'ack', ok, text }, '*');
   if (!payloadOk(stage, pid, d)) return ack(false, '页面和这一集对不上，没有提交：回列表重新打开再试');
   if (!S.canPush) return ack(false, '你的口令没有写权限，交不上：口令的 Contents 要选 Read and write，重新登录');
+  // 锁（11-20）：交之前再看一眼仓库——打开以后别人可能已经交了 / 认领了。锁着就不收。
+  try { await load(); } catch { /* 刷不了就按打开时的状态判 */ }
+  if (!S.current || S.current.pid !== pid || S.current.stage !== stage) return;
+  const rowS = rows(S.tree, S.desk, S.claimInfo, S.login, stage).find((x) => x.pid === pid);
+  const lkS = rowS ? lockOf(rowS, S.login, admins()) : S.current.lock;
+  if (lkS && lkS.locked) { $('taskmsg').textContent = lockText(lkS); return ack(false, lockText(lkS)); }
   const path = `results/${stage}/${pid}/${S.login}.json`;
   const cur = S.current;
   try {
@@ -486,6 +538,7 @@ async function start() {
   $('back').addEventListener('click', () => backToList(true).catch(() => {}));
   $('next').addEventListener('click', () => goNext().catch((e) => toast('打不开下一集：' + explain(e), 'bad')));
   $('release').addEventListener('click', () => release());
+  $('clear').addEventListener('click', () => clearSubmitted());
   window.addEventListener('popstate', () => { if (S.token && S.tree) route().catch(() => {}); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token && S.tree && !S.current && Date.now() - S.lastRefresh > 20000) refresh().catch(() => {}); });
   const repo = ls.get('repo');
