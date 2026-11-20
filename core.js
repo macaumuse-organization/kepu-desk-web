@@ -161,9 +161,48 @@ export function normRepo(s) {
   return String(s || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '').replace(/\.git$/, '');
 }
 
-/** 交上去的那份：页面导出的原样 + 谁、什么时候、对着哪份页面 */
-export function makeResult(stage, pid, me, payload, task, app, now = new Date()) {
-  return { stage, project: pid, by: me, at: now.toISOString(), app, task: { page_sha: (task && task.pageSha) || '', meta_sha: (task && task.metaSha) || '' }, payload };
+/** 交上去的那份：页面导出的原样 + 谁、什么时候、对着哪份页面。
+ *  state = 页面上每一栏填了什么（11-20 起一起存）：别人点进来、自己换一台电脑打开，都靠它把页面填回去；页面没给就不带这一格。 */
+export function makeResult(stage, pid, me, payload, task, app, now = new Date(), state = null) {
+  const r = { stage, project: pid, by: me, at: now.toISOString(), app, task: { page_sha: (task && task.pageSha) || '', meta_sha: (task && task.metaSha) || '' }, payload };
+  if (state) r.state = state;
+  return r;
+}
+
+/** 一集交过的几份（{ 账号: 那一份 }）里给这个人看哪一份：自己交过看自己的，不然看最晚交的。回 [账号, 那一份]，一份都没有回 ['', null] */
+export function resultToShow(results, me) {
+  const ks = Object.keys(results || {});
+  if (!ks.length) return ['', null];
+  const k = ks.includes(me) ? me : ks.sort((a, b) => cmp([String((results[a] || {}).at || ''), a], [String((results[b] || {}).at || ''), b])).pop();
+  return [k, results[k]];
+}
+
+/** 三选一交上来的结果 → 页面上每一栏填了什么（11-20 以前交的没存 state，靠这个反推）。
+ *  键的写法和页面里 deskKey 一样（pipeline/auto_page.py DESK_JS）：单选是 radio|名字，别的是 标签|类型|名字|class|data-unit|data-scene|id；
+ *  控件见 pipeline/compare_page.py（总体 overall、每段 sc_<场>、意见 input.c、改后的整段 textarea.seg、原因 select.rs、总的意见 #g）。 */
+export function pickStateFromPayload(p) {
+  const v = {};
+  const q = p || {};
+  if (q.overall) v['radio|overall'] = String(q.overall);
+  for (const [sid, lab] of Object.entries(q.scenes || {})) if (lab) v[`radio|sc_${sid}`] = String(lab);
+  for (const [sid, text] of Object.entries(q.comments || {})) if (text) v[`INPUT|text||c||${sid}|`] = String(text);
+  for (const seg of q.segs || []) {
+    if (!seg || !seg.scene) continue;
+    if (seg.text) v[`TEXTAREA|textarea||seg||${seg.scene}|`] = String(seg.text);
+    if (seg.reason) v[`SELECT|select-one||rs||${seg.scene}|`] = String(seg.reason);
+  }
+  if (q.general) v['TEXTAREA|textarea|||||g'] = String(q.general);
+  return { v, x: null };
+}
+
+/** 一份提交 → 能发回页面填上的 state。回 { state, why }：why 空 = 能填；'page' = 页面在提交之后换过（甲乙丙的顺序可能变了，填上去会张冠李戴，不填）；
+ *  'old' = 旧版网页交的、没存 state，细改 / 听评反推不了；'empty' = 这一份读不出东西。 */
+export function stateOfResult(stage, result, pageSha) {
+  if (!result || !result.payload) return { state: null, why: 'empty' };
+  if (((result.task || {}).page_sha || '') !== (pageSha || '')) return { state: null, why: 'page' };
+  if (result.state) return { state: result.state, why: '' };
+  if (stage === 'pick') return { state: pickStateFromPayload(result.payload), why: '' };
+  return { state: null, why: 'old' };
 }
 
 /** 页面交上来的是不是这一集这一阶段的 */

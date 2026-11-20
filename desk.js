@@ -2,10 +2,10 @@
 // 这个文件只有程序，不含任何讲稿；讲稿、配音都在私有仓库里，登录后才取得到。纯函数在 core.js。
 import {
   STAGES, STAGE_HINT, STATE_NAME, ago, b64, domainOf, domainsOf, draftKey, encPath, firstStop, isStale, makeHash, makeResult, nextRow, normRepo,
-  openCount, parseHash, parseTree, payloadOk, rows, summary,
-} from './core.js';
+  openCount, parseHash, parseTree, payloadOk, resultToShow, rows, stateOfResult, summary,
+} from './core.js?v=20261120a';
 
-const APP = '2026-11-12';
+const APP = '2026-11-20';
 const API = 'https://api.github.com';
 const $ = (id) => document.getElementById(id);
 const S = { repo: '', token: '', login: '', branch: 'main', canPush: false, isPrivate: true, tree: null, desk: null, domain: '', stage: '', mineOnly: false,
@@ -379,7 +379,31 @@ async function release() {
   await backToList();
 }
 
-// 框里的页面发来的消息：ready（页面起来了：有草稿就发回去填上）、draft（填的内容变了：存在这台电脑上）、submit（点了提交：写进私有仓库）
+/** 这台电脑上没有草稿、但这一集有人交过：把交上去的那份填回页面（11-20 用户发现：别人点「看看」是空的，看不到提交的人选了什么；自己换一台电脑也一样）。
+ *  自己交过看自己的，不然看最晚交的那份；页面在提交之后换过就不填，只在顶上说一声。只是看不算草稿（页面恢复时不往外报改动）。 */
+async function showSubmitted(win) {
+  const cur = S.current;
+  const logins = ((S.tree.results[cur.stage] || {})[cur.pid] || []).slice();
+  if (!logins.length) return;
+  const got = {};
+  await Promise.all(logins.map(async (k) => { try { got[k] = await getJson(`results/${cur.stage}/${cur.pid}/${k}.json`); } catch { /* 取不到的那一份就不看 */ } }));
+  if (S.current !== cur) return;
+  const [who, res] = resultToShow(got, S.login);
+  if (!res) return;
+  const mine = who === S.login;
+  const name = mine ? '你' : ` ${who} `; // 账号是英文，前后留个空；「你」不用
+  const others = Object.keys(got).filter((k) => k !== who);
+  const tail = others.length ? `（${others.join('、')} 也交过，这里没显示）` : '';
+  const { state, why } = stateOfResult(cur.stage, res, cur.pageSha);
+  if (!state) {
+    $('taskmsg').textContent = ((why === 'page' ? `${name}${ago(res.at)}交过，但之后页面换了新的，那一份填的内容对不上这一页，没有显示` : `${name}${ago(res.at)}交过；那一份是旧版网页交的，没存页面上填了什么，显示不出来`) + tail).trim();
+    return;
+  }
+  win.postMessage({ desk: 'restore', state, text: mine ? `这是你${ago(res.at)}提交时填的；改了再点提交会覆盖你那一份` : `这是 ${who} ${ago(res.at)}提交时填的。想改可以直接改了再点提交：你交的会另存一份，不会盖掉 ${who} 的` }, '*');
+  $('taskmsg').textContent = `下面是${name}${ago(res.at)}交的` + tail;
+}
+
+// 框里的页面发来的消息：ready（页面起来了：有草稿就发回去填上，没有草稿但有人交过就填交上去的那份）、draft（填的内容变了：存在这台电脑上）、submit（点了提交：写进私有仓库）
 window.addEventListener('message', async (ev) => {
   const frame = $('frame');
   if (!S.current || ev.source !== frame.contentWindow) return;
@@ -389,7 +413,10 @@ window.addEventListener('message', async (ev) => {
     const dr = drafts.get(stage, pid);
     if (dr && dr.pageSha === S.current.pageSha && dr.state) {
       ev.source.postMessage({ desk: 'restore', state: dr.state, text: dr.submitted ? `这是你上次提交时填的（${ago(dr.at)}）；改了再点提交会覆盖` : `已恢复你${ago(dr.at)}填到一半的内容` }, '*');
-    } else if (dr) drafts.del(stage, pid); // 页面换过了，旧草稿对不上
+      return;
+    }
+    if (dr) drafts.del(stage, pid); // 页面换过了，旧草稿对不上
+    showSubmitted(ev.source).catch(() => {}); // 这台电脑上没有草稿：有人交过就把交上去的那份填回页面
     return;
   }
   if (d.desk === 'draft') {
@@ -407,7 +434,7 @@ window.addEventListener('message', async (ev) => {
   const cur = S.current;
   try {
     const sha = await shaOf(path);
-    await putJson(path, makeResult(stage, pid, S.login, d.payload, cur, APP), `${STAGES[stage]}提交：${pid}（${S.login}）`, sha);
+    await putJson(path, makeResult(stage, pid, S.login, d.payload, cur, APP, new Date(), d.state || null), `${STAGES[stage]}提交：${pid}（${S.login}）`, sha);
     const tm = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     if (d.state) drafts.set(stage, pid, { pageSha: cur.pageSha, at: new Date().toISOString(), state: d.state, submitted: true });
     if (S.current !== cur) return;
