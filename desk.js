@@ -194,7 +194,7 @@ const where = (ep, pid) => [ep.episode, ep.part && `${ep.part}集`, ep.frames &&
 
 /** 现在看哪个领域、哪一步：地址栏 > 上次看的 > 第一个有活的 */
 function settle(by) {
-  const domains = domainsOf(Object.values(by).flat());
+  const domains = domainsOf(Object.values(by).flat(), (S.desk && S.desk.domain_order) || []);
   const first = firstStop(by, domains);
   if (!domains.includes(S.domain)) S.domain = domains.includes(ls.get('domain')) ? ls.get('domain') : first.domain;
   if (!STAGES[S.stage]) {

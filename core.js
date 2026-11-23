@@ -49,9 +49,10 @@ export function domainOf(r) {
   return ((r && r.ep) || {}).domain || NO_DOMAIN;
 }
 
-/** 这些行里有哪几个领域（去重、排好序；「其他」放最后） */
-export function domainsOf(rs) {
-  const ds = [...new Set(rs.map(domainOf))].sort();
+/** 这些行里有哪几个领域（去重、排好序；「其他」放最后）。order（desk.json 的 domain_order，11-21）里列了的按它排，没列的按名字排在后面 */
+export function domainsOf(rs, order = []) {
+  const rank = (d) => { const i = (order || []).indexOf(d); return i < 0 ? Infinity : i; };
+  const ds = [...new Set(rs.map(domainOf))].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
   return ds.filter((d) => d !== NO_DOMAIN).concat(ds.includes(NO_DOMAIN) ? [NO_DOMAIN] : []);
 }
 function cmp(a, b) {
