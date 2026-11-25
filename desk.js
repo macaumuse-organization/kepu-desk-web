@@ -533,7 +533,11 @@ async function start() {
   };
   $('enter').addEventListener('click', login);
   $('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
-  $('logout').addEventListener('click', () => { ls.del('token'); ls.clearDrafts(); S.token = ''; S.current = null; freshFrame(''); showLogin('已退出（这台电脑上的口令和草稿都删掉了）'); });
+  // 11-25：按钮写明是「退出登录」，点了先问一句——有人想回列表点了它，口令被清掉、得回 GitHub 重新找
+  $('logout').addEventListener('click', () => {
+    if (!confirm('退出登录？\n\n这台电脑上存的口令和没交的草稿都会删掉，下次要重新贴 GitHub 口令。\n\n只是想回列表：点「取消」，再点左上角的「← 回列表」。')) return;
+    ls.del('token'); ls.clearDrafts(); S.token = ''; S.current = null; freshFrame(''); showLogin('已退出登录（这台电脑上的口令和草稿都删掉了）');
+  });
   $('refresh').addEventListener('click', () => refresh().then(() => toast('刷新好了')).catch((e) => toast('刷新不了：' + explain(e), 'bad')));
   $('back').addEventListener('click', () => backToList(true).catch(() => {}));
   $('next').addEventListener('click', () => goNext().catch((e) => toast('打不开下一集：' + explain(e), 'bad')));
